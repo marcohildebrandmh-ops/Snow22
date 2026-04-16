@@ -1,0 +1,5 @@
+{
+  "name": "WebGPU TSL Cube Dodger",
+  "description": "Ein reines HTML-Spiel mit WebGPU, Three.js und TSL. Weiche den fallenden Blöcken aus!",
+  "requestFramePermissions": []
+}
