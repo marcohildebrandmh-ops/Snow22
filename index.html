@@ -653,14 +653,20 @@
     let gHeightCacheRes = 0;
 
     // Live-Terrain-Deformation ("Board-Rille")
+    // Map ist 12×12 Welt bei Grid-Auflösung 256 → eine Zelle = 0.047 Welteinheiten.
+    // Das Board ist nur ~0.047 wide × 0.28 long (genau 1 Zelle breit). Damit die
+    // Rille auch dann sichtbar ist, wenn das Board zwischen Vertex-Spalten fährt,
+    // nutzen wir eine Carve-Zone mit Falloff-Ring: Kernfläche = exakte Board-Breite,
+    // Falloff-Ring = 1 Grid-Zelle (0.047) außen herum, smoothstep-gewichtet.
     let gDeformationCache = null;          // Float32Array, negativer Offset zur gHeightCache
     const gDirtyDeform    = new Set();     // Vertex-Indizes mit gDeformationCache[i] < 0 (zu refillen)
     const boardCarve = {
-      halfWidth:   0.0234,   // halbe Breite des Boards in Weltkoordinaten (boardWidth*0.5*boardScale)
-      halfLength:  0.1395,   // halbe Länge des Boards in Weltkoordinaten
-      maxDepth:    0.008,    // maximale Tiefe der Rille
-      carveRate:   0.03,     // Tiefe pro Sekunde beim Überfahren (erreicht maxDepth in ~0.27 s)
-      refillRate:  0.0004    // Auffüllgeschwindigkeit (~20 s bis Rille wieder voll ist)
+      halfWidth:   0.0234,   // halbe Board-Breite in Weltkoordinaten (boardWidth*0.5*boardScale)
+      halfLength:  0.1395,   // halbe Board-Länge in Weltkoordinaten
+      falloff:     0.05,     // weicher Rand rund um das Board (~1 Grid-Zelle)
+      maxDepth:    0.03,     // maximale Rillen-Tiefe im Kern
+      carveRate:   0.12,     // Tiefe pro Sekunde beim Überfahren (erreicht maxDepth in ~0.25 s)
+      refillRate:  0.0015    // Auffüllgeschwindigkeit (~20 s bis Rille wieder voll ist)
     };
 
     function buildHeightCache(geometry) {
@@ -766,18 +772,21 @@
       let geomDirty = false;
 
       if (carveActive) {
-        const hw = boardCarve.halfWidth;
-        const hl = boardCarve.halfLength;
+        const hw   = boardCarve.halfWidth;
+        const hl   = boardCarve.halfLength;
+        const fo   = boardCarve.falloff;
+        const hwO  = hw + fo;   // äußere Grenze Breite
+        const hlO  = hl + fo;   // äußere Grenze Länge
         const cosA = Math.cos(rotAngle);
         const sinA = Math.sin(rotAngle);
-        // AABB um das rotierte Rechteck (konservativ via Diagonale)
-        const aabbR = Math.hypot(hw, hl);
+        // AABB um das rotierte Rechteck inkl. Falloff (konservativ via Diagonale)
+        const aabbR = Math.hypot(hwO, hlO);
         const gMinX = Math.max(0, Math.floor(((px - aabbR) / w + 0.5) * r));
         const gMaxX = Math.min(r, Math.ceil (((px + aabbR) / w + 0.5) * r));
         const gMinZ = Math.max(0, Math.floor(((pz - aabbR) / d + 0.5) * r));
         const gMaxZ = Math.min(r, Math.ceil (((pz + aabbR) / d + 0.5) * r));
         const carveAmount = boardCarve.carveRate * dt;
-        const maxDepthNeg = -boardCarve.maxDepth;
+        const maxDepth = boardCarve.maxDepth;
 
         for (let iz = gMinZ; iz <= gMaxZ; iz++) {
           for (let ix = gMinX; ix <= gMaxX; ix++) {
@@ -788,15 +797,26 @@
             // Board-lokales Koordinatensystem: forward = (sinA, cosA), right = (cosA, -sinA)
             const localX = dx * cosA - dz * sinA;
             const localZ = dx * sinA + dz * cosA;
-            if (Math.abs(localX) <= hw && Math.abs(localZ) <= hl) {
-              const i = iz * vPR + ix;
-              const nv = Math.max(gDeformationCache[i] - carveAmount, maxDepthNeg);
-              if (nv !== gDeformationCache[i]) {
-                gDeformationCache[i] = nv;
-                pos.setY(i, gHeightCache[i] + nv);
-                gDirtyDeform.add(i);
-                geomDirty = true;
-              }
+            const absX = Math.abs(localX);
+            const absZ = Math.abs(localZ);
+            if (absX >= hwO || absZ >= hlO) continue;
+
+            // Strength per Achse: 1 im Kern, smoothstep-Abfall zu 0 am Rand
+            const sx = absX <= hw ? 1 : 1 - THREE.MathUtils.smoothstep(absX, hw, hwO);
+            const sz = absZ <= hl ? 1 : 1 - THREE.MathUtils.smoothstep(absZ, hl, hlO);
+            const strength = sx * sz;
+            if (strength <= 0) continue;
+
+            const targetDepth = -maxDepth * strength;
+            const i = iz * vPR + ix;
+            const cur = gDeformationCache[i];
+            if (cur <= targetDepth) continue; // schon tief genug an dieser Stelle
+            const nv = Math.max(cur - carveAmount * strength, targetDepth);
+            if (nv < cur) {
+              gDeformationCache[i] = nv;
+              pos.setY(i, gHeightCache[i] + nv);
+              gDirtyDeform.add(i);
+              geomDirty = true;
             }
           }
         }
