@@ -652,6 +652,17 @@
     let gNormalCacheZ  = null;
     let gHeightCacheRes = 0;
 
+    // Live-Terrain-Deformation ("Board-Rille")
+    let gDeformationCache = null;          // Float32Array, negativer Offset zur gHeightCache
+    const gDirtyDeform    = new Set();     // Vertex-Indizes mit gDeformationCache[i] < 0 (zu refillen)
+    const boardCarve = {
+      halfWidth:   0.0234,   // halbe Breite des Boards in Weltkoordinaten (boardWidth*0.5*boardScale)
+      halfLength:  0.1395,   // halbe Länge des Boards in Weltkoordinaten
+      maxDepth:    0.008,    // maximale Tiefe der Rille
+      carveRate:   0.03,     // Tiefe pro Sekunde beim Überfahren (erreicht maxDepth in ~0.27 s)
+      refillRate:  0.0004    // Auffüllgeschwindigkeit (~20 s bis Rille wieder voll ist)
+    };
+
     function buildHeightCache(geometry) {
       const pos  = geometry.attributes.position;
       const norm = geometry.attributes.normal;
@@ -669,6 +680,9 @@
         gNormalCacheY[i] = norm.getY(i);
         gNormalCacheZ[i] = norm.getZ(i);
       }
+      // Deformations-Cache bei jedem Terrain-Rebuild zurücksetzen
+      gDeformationCache = new Float32Array(count);
+      gDirtyDeform.clear();
     }
 
     const _tmpNormal = new THREE.Vector3();
@@ -685,8 +699,12 @@
       const vPR = r + 1;
       const i00 = iz * vPR + ix,  i10 = iz * vPR + (ix + 1);
       const i01 = (iz + 1) * vPR + ix, i11 = (iz + 1) * vPR + (ix + 1);
-      const h0 = gHeightCache[i00] * (1 - fx) + gHeightCache[i10] * fx;
-      const h1 = gHeightCache[i01] * (1 - fx) + gHeightCache[i11] * fx;
+      const d00 = gDeformationCache ? gDeformationCache[i00] : 0;
+      const d10 = gDeformationCache ? gDeformationCache[i10] : 0;
+      const d01 = gDeformationCache ? gDeformationCache[i01] : 0;
+      const d11 = gDeformationCache ? gDeformationCache[i11] : 0;
+      const h0 = (gHeightCache[i00] + d00) * (1 - fx) + (gHeightCache[i10] + d10) * fx;
+      const h1 = (gHeightCache[i01] + d01) * (1 - fx) + (gHeightCache[i11] + d11) * fx;
       const ny0 = gNormalCacheY[i00] * (1 - fx) + gNormalCacheY[i10] * fx;
       const ny1 = gNormalCacheY[i01] * (1 - fx) + gNormalCacheY[i11] * fx;
       const nx0 = gNormalCacheX[i00] * (1 - fx) + gNormalCacheX[i10] * fx;
@@ -732,10 +750,76 @@
     let gObstaclesData = []; // NEU: Speichert exakte Hindernis-Zonen für die Boost-Physik
 
     function getCombinedHeightAndNormal(x, z) {
-      // Da die Hindernisse direkt in den Terrain-Schnee modelliert (gecarvt) sind, 
+      // Da die Hindernisse direkt in den Terrain-Schnee modelliert (gecarvt) sind,
       // brauchen wir keine aufwendige und fehleranfällige Raycast-Kollision mit Geometrien.
       const t = getTerrainHeightAndNormal(x, z);
       return { y: Math.max(t.y, -2.5), normal: t.normal };
+    }
+
+    // Live Board-Rille: verformt das Terrain unter dem Snowboard und füllt die Rille
+    // langsam wieder auf. Wird pro Frame aus der animate-Loop aufgerufen (siehe unten).
+    function applyBoardDeformation(dt, carveActive, px, pz, rotAngle) {
+      if (!gDeformationCache || !terrainMesh) return;
+      const pos = terrainMesh.geometry.attributes.position;
+      const w = terrainArgs.width, d = terrainArgs.depth, r = gHeightCacheRes;
+      const vPR = r + 1;
+      let geomDirty = false;
+
+      if (carveActive) {
+        const hw = boardCarve.halfWidth;
+        const hl = boardCarve.halfLength;
+        const cosA = Math.cos(rotAngle);
+        const sinA = Math.sin(rotAngle);
+        // AABB um das rotierte Rechteck (konservativ via Diagonale)
+        const aabbR = Math.hypot(hw, hl);
+        const gMinX = Math.max(0, Math.floor(((px - aabbR) / w + 0.5) * r));
+        const gMaxX = Math.min(r, Math.ceil (((px + aabbR) / w + 0.5) * r));
+        const gMinZ = Math.max(0, Math.floor(((pz - aabbR) / d + 0.5) * r));
+        const gMaxZ = Math.min(r, Math.ceil (((pz + aabbR) / d + 0.5) * r));
+        const carveAmount = boardCarve.carveRate * dt;
+        const maxDepthNeg = -boardCarve.maxDepth;
+
+        for (let iz = gMinZ; iz <= gMaxZ; iz++) {
+          for (let ix = gMinX; ix <= gMaxX; ix++) {
+            const vx = (ix / r - 0.5) * w;
+            const vz = (iz / r - 0.5) * d;
+            const dx = vx - px;
+            const dz = vz - pz;
+            // Board-lokales Koordinatensystem: forward = (sinA, cosA), right = (cosA, -sinA)
+            const localX = dx * cosA - dz * sinA;
+            const localZ = dx * sinA + dz * cosA;
+            if (Math.abs(localX) <= hw && Math.abs(localZ) <= hl) {
+              const i = iz * vPR + ix;
+              const nv = Math.max(gDeformationCache[i] - carveAmount, maxDepthNeg);
+              if (nv !== gDeformationCache[i]) {
+                gDeformationCache[i] = nv;
+                pos.setY(i, gHeightCache[i] + nv);
+                gDirtyDeform.add(i);
+                geomDirty = true;
+              }
+            }
+          }
+        }
+      }
+
+      // Refill: verformte Zellen langsam zurück auf 0 führen
+      if (gDirtyDeform.size > 0) {
+        const refillAmount = boardCarve.refillRate * dt;
+        for (const i of gDirtyDeform) {
+          const nv = gDeformationCache[i] + refillAmount;
+          if (nv >= 0) {
+            gDeformationCache[i] = 0;
+            pos.setY(i, gHeightCache[i]);
+            gDirtyDeform.delete(i);
+          } else {
+            gDeformationCache[i] = nv;
+            pos.setY(i, gHeightCache[i] + nv);
+          }
+          geomDirty = true;
+        }
+      }
+
+      if (geomDirty) pos.needsUpdate = true;
     }
 
     // ─── BAUM MANAGER (2D PNG Cross-Billboards für maximale Performance) ──────────
@@ -2371,6 +2455,13 @@
             _quatTarget.setFromUnitVectors(_quatUp, _quatUp);
             playerMeshGroup.quaternion.slerp(_quatTarget, 3*actualDt);
           }
+
+          // Live-Terrain-Rille: nur wenn Board auf Schnee (nicht airborne / kein Obstacle)
+          const carving = !isAirborne && !activeObs;
+          applyBoardDeformation(
+            actualDt, carving,
+            playerGroup.position.x, playerGroup.position.z, rotationAngle
+          );
         }
         const realSpeedMs=(velocity.length()/PLAYER_SCALE)*3.0;
         const speedKmh = realSpeedMs * 3.6;
