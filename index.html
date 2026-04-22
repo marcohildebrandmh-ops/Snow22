@@ -1,5 +1,3 @@
-Letzeer stand 
-
 <!doctype html>
 <html lang="en">
 <head>
@@ -157,7 +155,7 @@ Letzeer stand
     .section-title { font-weight: bold; color: #fff; margin-top: 4px; padding-bottom: 2px; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;}
   </style>
 
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lucide@0.460.0"></script>
   <script type="importmap">
     {
       "imports": {
@@ -690,7 +688,7 @@ Letzeer stand
       const h0 = gHeightCache[i00] * (1 - fx) + gHeightCache[i10] * fx;
       const h1 = gHeightCache[i01] * (1 - fx) + gHeightCache[i11] * fx;
       const ny0 = gNormalCacheY[i00] * (1 - fx) + gNormalCacheY[i10] * fx;
-      const ny1 = gNormalCacheY[i01] * (1 - fx) + gNormalCacheY[i10] * fx; 
+      const ny1 = gNormalCacheY[i01] * (1 - fx) + gNormalCacheY[i11] * fx;
       const nx0 = gNormalCacheX[i00] * (1 - fx) + gNormalCacheX[i10] * fx;
       const nx1 = gNormalCacheX[i01] * (1 - fx) + gNormalCacheX[i11] * fx;
       const nz0 = gNormalCacheZ[i00] * (1 - fx) + gNormalCacheZ[i10] * fx;
@@ -1609,8 +1607,15 @@ Letzeer stand
     }
 
     function initSnow() {
-        if (snowParticles) scene.remove(snowParticles);
-        
+        if (snowParticles) {
+            scene.remove(snowParticles);
+            if (snowParticles.geometry) snowParticles.geometry.dispose();
+            if (snowParticles.material) {
+                if (snowParticles.material.map) snowParticles.material.map.dispose();
+                snowParticles.material.dispose();
+            }
+        }
+
         snowGeometry = new THREE.BufferGeometry();
         const positions = new Float32Array(snowParams.count * 3);
         snowVelocities = [];
@@ -2075,6 +2080,9 @@ Letzeer stand
       const _quatTarget  = new THREE.Quaternion();
       const _quatUp      = new THREE.Vector3(0, 1, 0);
       const _quatInv     = new THREE.Quaternion();
+      const _tmpCamUp    = new THREE.Vector3();
+      const _tmpGravN    = new THREE.Vector3();
+      const _tmpObsLocal = new THREE.Vector3();
 
       let orbitAzimuthal=Math.PI,orbitPolar=Math.PI/2.5,orbitRadius=3.0 * PLAYER_SCALE; 
       let isDragging=false,previousPointer={x:0,y:0},activePointers=[],prevPinchDist=-1;
@@ -2263,7 +2271,7 @@ Letzeer stand
             velocity.y -= 9.8 * PLAYER_SCALE * actualDt; 
           } else {
             _forward.set(Math.sin(rotationAngle), 0, Math.cos(rotationAngle));
-            _forward.sub(gNormal.clone().multiplyScalar(_forward.dot(gNormal))).normalize();
+            _forward.sub(_tmpGravN.copy(gNormal).multiplyScalar(_forward.dot(gNormal))).normalize();
             _gravVec.set(0, -9.8 * PLAYER_SCALE, 0);
             _gravOnN.copy(gNormal).multiplyScalar(_gravVec.dot(gNormal));
             _slopeForce.copy(_gravVec).sub(_gravOnN);
@@ -2282,9 +2290,8 @@ Letzeer stand
         // Zonen-Check: Steht der Snowboarder auf einem Hindernis?
         let forceJump = false;
         if (!isAirborne) {
-            const tVec = new THREE.Vector3(playerGroup.position.x, playerGroup.position.y, playerGroup.position.z);
             for(let obj of gObstaclesData) {
-                const local = tVec.clone().applyMatrix4(obj.invMat);
+                const local = _tmpObsLocal.copy(playerGroup.position).applyMatrix4(obj.invMat);
                 // Minimaler Buffer für die genaue Absprungkante
                 if(Math.abs(local.x) < obj.objHalfWidth + obj.padW * 0.5 && Math.abs(local.z) < obj.objHalfLen + obj.padL * 0.5) {
                     activeObs = obj.type;
@@ -2463,7 +2470,7 @@ Letzeer stand
           camera.position.copy(currentCameraPos);
           
           // Blickpunkt exakt und starr auf den Spieler richten
-          _camLookAt.copy(playerGroup.position).add(_quatUp.clone().multiplyScalar(0.3 * PLAYER_SCALE));
+          _camLookAt.copy(playerGroup.position).add(_tmpCamUp.copy(_quatUp).multiplyScalar(0.3 * PLAYER_SCALE));
           camera.lookAt(_camLookAt);
 
         } else if (camMode === 1) {
@@ -2489,7 +2496,7 @@ Letzeer stand
           camera.position.copy(currentCameraPos);
           
           // Blickpunkt auf den Spieler richten
-          _camLookAt.copy(playerGroup.position).add(_quatUp.clone().multiplyScalar(0.2 * PLAYER_SCALE));
+          _camLookAt.copy(playerGroup.position).add(_tmpCamUp.copy(_quatUp).multiplyScalar(0.2 * PLAYER_SCALE));
           camera.lookAt(_camLookAt);
           
         } else if (camMode === 3) {
